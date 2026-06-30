@@ -400,6 +400,30 @@ describe('Yalc package manager', function () {
       ok(fs.lstatSync(copiedHeadersLinkPath).isSymbolicLink())
       strictEqual(fs.readlinkSync(copiedHeadersLinkPath), 'Versions/B/Headers')
     })
+
+    it('excludes symlinks from directories outside the files field', async () => {
+      // Simulate ios/Pods-style symlinks that should never be published
+      const podsDir = join(depPackageSymlinkDir, 'example', 'ios', 'Pods', 'Headers')
+      fs.ensureDirSync(podsDir)
+      fs.symlinkSync('bignum.h', join(podsDir, 'bignum-link.h'))
+
+      await copyPackageToStore({ workingDir: depPackageSymlinkDir })
+
+      // Symlink outside files field must not appear in the store
+      checkNotExists(
+        join(
+          publishedPackageSymlinkPath,
+          'example',
+          'ios',
+          'Pods',
+          'Headers',
+          'bignum-link.h'
+        )
+      )
+
+      // Clean up
+      fs.removeSync(join(depPackageSymlinkDir, 'example'))
+    })
   })
 
   describe('Add package', () => {
