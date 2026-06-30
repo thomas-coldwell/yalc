@@ -14,6 +14,7 @@ import { readInstallationsFile } from '../src/installations'
 
 import { readLockfile, LockFileConfigV1 } from '../src/lockfile'
 import { copyPackageToStore } from '../src/copy'
+import { copyDirSafe } from '../src/sync-dir'
 
 const values = {
   depPackage: 'dep-package',
@@ -434,7 +435,6 @@ describe('Yalc package manager', function () {
       fs.removeSync(destDir)
       fs.ensureDirSync(destDir)
 
-      const { copyDirSafe } = require('../src/sync-dir')
       await copyDirSafe(publishedPackageSymlinkPath, destDir, false)
 
       // Symlinks should be preserved in dest
