@@ -14,11 +14,17 @@ import {
 
 const shortSignatureLength = 8
 
-export const getFileHash = (srcPath: string, relPath: string = '') => {
-  return new Promise<string>(async (resolve, reject) => {
+export const getFileHash = async (srcPath: string, relPath: string = '') => {
+  const stat = await fs.lstat(srcPath)
+  const md5sum = crypto.createHash('md5')
+  md5sum.update(relPath.replace(/\\/g, '/'))
+  if (stat.isSymbolicLink()) {
+    const targetPath = await fs.readlink(srcPath)
+    md5sum.update(targetPath)
+    return md5sum.digest('hex')
+  }
+  return new Promise<string>((resolve, reject) => {
     const stream = fs.createReadStream(srcPath)
-    const md5sum = crypto.createHash('md5')
-    md5sum.update(relPath.replace(/\\/g, '/'))
     stream.on('data', (data: string) => md5sum.update(data))
     stream.on('error', reject).on('close', () => {
       resolve(md5sum.digest('hex'))
@@ -31,8 +37,38 @@ const copyFile = async (
   destPath: string,
   relPath: string = ''
 ) => {
-  await fs.copy(srcPath, destPath)
+  const stat = await fs.lstat(srcPath)
+  if (stat.isSymbolicLink()) {
+    const targetPath = await fs.readlink(srcPath)
+    await fs.ensureDir(dirname(destPath))
+    await fs.symlink(targetPath, destPath)
+  } else {
+    await fs.copy(srcPath, destPath)
+  }
   return getFileHash(srcPath, relPath)
+}
+
+const listSymlinks = async (
+  workingDir: string,
+  relPath: string = ''
+): Promise<string[]> => {
+  const currentDir = relPath ? join(workingDir, relPath) : workingDir
+  const entries = await fs.readdir(currentDir)
+  const nestedLists = await Promise.all(
+    entries.map(async (entryName) => {
+      const childRelPath = relPath ? join(relPath, entryName) : entryName
+      const childPath = join(currentDir, entryName)
+      const stat = await fs.lstat(childPath)
+      if (stat.isSymbolicLink()) {
+        return [childRelPath.replace(/\\/g, '/')]
+      }
+      if (stat.isDirectory()) {
+        return listSymlinks(workingDir, childRelPath)
+      }
+      return []
+    })
+  )
+  return nestedLists.reduce<string[]>((all, next) => all.concat(next), [])
 }
 
 const mapObj = <T, R, K extends string>(
@@ -152,7 +188,10 @@ export const copyPackageToStore = async (options: {
     fixScopedRelativeName
   )
 
-  const filesToCopy = npmList.filter((f) => !ignoreRule.ignores(f))
+  const symlinkList = await listSymlinks(workingDir)
+  const filesToCopy = Array.from(new Set(npmList.concat(symlinkList))).filter(
+    (f) => !ignoreRule.ignores(f)
+  )
   if (options.content) {
     console.info('Files included in published content:')
     filesToCopy.sort().forEach((f) => {
