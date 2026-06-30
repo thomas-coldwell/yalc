@@ -424,6 +424,33 @@ describe('Yalc package manager', function () {
       // Clean up
       fs.removeSync(join(depPackageSymlinkDir, 'example'))
     })
+
+    it('copies symlinks correctly via copyDirSafe (update scenario)', async () => {
+      // Republish to ensure store has symlinks
+      await copyPackageToStore({ workingDir: depPackageSymlinkDir })
+
+      // Simulate yalc add: copy from store to a destination directory
+      const destDir = join(tmpDir, 'symlink-update-dest')
+      fs.removeSync(destDir)
+      fs.ensureDirSync(destDir)
+
+      const { copyDirSafe } = require('../src/sync-dir')
+      await copyDirSafe(publishedPackageSymlinkPath, destDir, false)
+
+      // Symlinks should be preserved in dest
+      const headersLink = join(destDir, 'Framework.xcframework', 'Headers')
+      ok(fs.lstatSync(headersLink).isSymbolicLink(), 'Headers should be a symlink')
+      strictEqual(fs.readlinkSync(headersLink), 'Versions/B/Headers')
+
+      // Simulate yalc update: copy again (second call should not ENOENT)
+      await copyDirSafe(publishedPackageSymlinkPath, destDir, true)
+
+      // Symlinks still intact after update
+      ok(fs.lstatSync(headersLink).isSymbolicLink(), 'Headers should still be a symlink after update')
+      strictEqual(fs.readlinkSync(headersLink), 'Versions/B/Headers')
+
+      fs.removeSync(destDir)
+    })
   })
 
   describe('Add package', () => {

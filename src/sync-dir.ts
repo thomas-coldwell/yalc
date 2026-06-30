@@ -1,6 +1,6 @@
 import glob from 'glob'
 import util from 'util'
-import { resolve } from 'path'
+import { dirname, resolve } from 'path'
 import fs from 'fs-extra'
 import { getFileHash } from './copy'
 
@@ -40,6 +40,17 @@ const theSameStats = (srcStat: fs.Stats, destStat: fs.Stats) => {
   )
 }
 
+const copySymlink = async (srcPath: string, destPath: string) => {
+  const target = await fs.readlink(srcPath)
+  await fs.ensureDir(dirname(destPath))
+  try {
+    await fs.remove(destPath)
+  } catch (e) {
+    // ignore
+  }
+  await fs.symlink(target, destPath)
+}
+
 export const copyDirSafe = async (
   srcDir: string,
   destDir: string,
@@ -71,12 +82,36 @@ export const copyDirSafe = async (
     srcCached[file] = srcCached[file] || {}
     const srcFilePath = resolve(srcDir, file)
     const destFilePath = resolve(destDir, file)
-    const srcFileStat = srcCached[file].stat || (await fs.stat(srcFilePath))
+    const srcFileStat = srcCached[file].stat || (await fs.lstat(srcFilePath))
     srcCached[file].stat = srcFileStat
-    const destFileStat = await fs.stat(destFilePath)
+    let destFileStat: fs.Stats
+    try {
+      destFileStat = await fs.lstat(destFilePath)
+    } catch (e) {
+      // dest entry inaccessible (dangling), treat as new
+      filesToReplace.push(file)
+      continue
+    }
+
+    const srcIsSymlink = srcFileStat.isSymbolicLink()
+    const destIsSymlink = destFileStat.isSymbolicLink()
+
+    // If src is a symlink, check if dest matches
+    if (srcIsSymlink) {
+      if (destIsSymlink) {
+        const srcTarget = await fs.readlink(srcFilePath)
+        const destTarget = await fs.readlink(destFilePath)
+        if (srcTarget !== destTarget) {
+          filesToReplace.push(file)
+        }
+      } else {
+        filesToReplace.push(file)
+      }
+      continue
+    }
 
     const areDirs = srcFileStat.isDirectory() && destFileStat.isDirectory()
-    dirsInDest[file] = destFileStat.isDirectory()
+    dirsInDest[file] = destFileStat.isDirectory() && !destIsSymlink
 
     const replacedFileWithDir =
       srcFileStat.isDirectory() && !destFileStat.isDirectory()
@@ -103,10 +138,6 @@ export const copyDirSafe = async (
     }
   }
 
-  // console.log('newFiles', newFiles)
-  // console.log('filesToRemove', filesToRemove)
-  // console.log('filesToReplace', filesToReplace)
-
   // first remove files
   await Promise.all(
     filesToRemove
@@ -120,16 +151,41 @@ export const copyDirSafe = async (
       .map((file) => fs.remove(resolve(destDir, file)))
   )
 
-  const newFilesDirs = await Promise.all(
-    newFiles.map((file) =>
-      fs.stat(resolve(srcDir, file)).then((stat) => stat.isDirectory())
-    )
+  const newFileTypes = await Promise.all(
+    newFiles.map(async (file) => {
+      const stat = await fs.lstat(resolve(srcDir, file))
+      return { isDir: stat.isDirectory(), isSymlink: stat.isSymbolicLink() }
+    })
   )
 
+  // Copy symlinks from new files
   await Promise.all(
     newFiles
-      .filter((file, index) => !newFilesDirs[index])
-      .concat(filesToReplace)
+      .filter((_file, index) => newFileTypes[index].isSymlink)
+      .map((file) => copySymlink(resolve(srcDir, file), resolve(destDir, file)))
+  )
+
+  // Copy regular files (not dirs, not symlinks)
+  await Promise.all(
+    newFiles
+      .filter(
+        (_file, index) =>
+          !newFileTypes[index].isDir && !newFileTypes[index].isSymlink
+      )
       .map((file) => fs.copy(resolve(srcDir, file), resolve(destDir, file)))
+  )
+
+  // Handle replacements: could be symlinks or regular files
+  await Promise.all(
+    filesToReplace.map(async (file) => {
+      const srcPath = resolve(srcDir, file)
+      const destPath = resolve(destDir, file)
+      const stat = await fs.lstat(srcPath)
+      if (stat.isSymbolicLink()) {
+        await copySymlink(srcPath, destPath)
+      } else {
+        await fs.copy(srcPath, destPath)
+      }
+    })
   )
 }
