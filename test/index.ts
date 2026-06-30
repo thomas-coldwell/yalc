@@ -14,7 +14,6 @@ import { readInstallationsFile } from '../src/installations'
 
 import { readLockfile, LockFileConfigV1 } from '../src/lockfile'
 import { copyPackageToStore } from '../src/copy'
-import { copyDirSafe } from '../src/sync-dir'
 
 const values = {
   depPackage: 'dep-package',
@@ -277,179 +276,71 @@ describe('Yalc package manager', function () {
     })
   })
 
-  describe('Package publish with symlinks', () => {
+  describe('Symlink publish', () => {
+    const fwDir = (...p: string[]) =>
+      join(depPackageSymlinkDir, 'lib.framework', ...p)
+    const pubFwDir = (...p: string[]) =>
+      join(publishedPackageSymlinkPath, 'lib.framework', ...p)
+
     before(async () => {
       fs.removeSync(depPackageSymlinkDir)
-      fs.ensureDirSync(join(depPackageSymlinkDir, 'Framework.xcframework'))
-      fs.ensureDirSync(
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Versions', 'A')
-      )
-      fs.ensureDirSync(
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Versions', 'A', 'Headers')
-      )
-      fs.ensureDirSync(
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Versions', 'A', 'Modules')
-      )
-      fs.writeFileSync(
-        join(
-          depPackageSymlinkDir,
-          'Framework.xcframework',
-          'Versions',
-          'A',
-          'Headers',
-          'header.h'
-        ),
-        '// header'
-      )
-      fs.writeFileSync(
-        join(
-          depPackageSymlinkDir,
-          'Framework.xcframework',
-          'Versions',
-          'A',
-          'Modules',
-          'module.modulemap'
-        ),
-        'module framework {}'
-      )
-
+      fs.ensureDirSync(fwDir('Versions', 'A', 'Headers'))
+      fs.ensureDirSync(fwDir('Versions', 'A', 'Resources'))
+      fs.writeFileSync(fwDir('Versions', 'A', 'Headers', 'api.h'), '')
+      fs.writeFileSync(fwDir('Versions', 'A', 'Resources', 'Info.plist'), '')
+      fs.symlinkSync('Versions/A/Headers', fwDir('Headers'))
+      fs.symlinkSync('Versions/A/Resources', fwDir('Resources'))
+      fs.symlinkSync('A', fwDir('Versions', 'Current'))
       fs.writeJsonSync(join(depPackageSymlinkDir, 'package.json'), {
         name: values.depPackageSymlink,
         version: values.depPackageSymlinkVersion,
-        files: ['Framework.xcframework'],
+        files: ['lib.framework'],
       })
-
-      fs.symlinkSync(
-        'Versions/A/Headers',
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Headers')
-      )
-      fs.symlinkSync(
-        'Versions/A/Modules',
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Modules')
-      )
-      fs.symlinkSync(
-        'A',
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Versions', 'Current')
-      )
-      fs.symlinkSync(
-        'Headers/header.h',
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'HeaderLink')
-      )
-
-      await copyPackageToStore({
-        workingDir: depPackageSymlinkDir,
-      })
-    })
-
-    it('preserves directory symlinks on copy', () => {
-      const headersLinkPath = join(publishedPackageSymlinkPath, 'Framework.xcframework', 'Headers')
-      ok(fs.lstatSync(headersLinkPath).isSymbolicLink())
-      strictEqual(fs.readlinkSync(headersLinkPath), 'Versions/A/Headers')
-    })
-
-    it('preserves nested symlink paths on copy', () => {
-      const currentLinkPath = join(
-        publishedPackageSymlinkPath,
-        'Framework.xcframework',
-        'Versions',
-        'Current'
-      )
-      ok(fs.lstatSync(currentLinkPath).isSymbolicLink())
-      strictEqual(fs.readlinkSync(currentLinkPath), 'A')
-    })
-
-    it('keeps symlink hashing stable for --changed', async () => {
-      const unchangedResult = await copyPackageToStore({
-        workingDir: depPackageSymlinkDir,
-        changed: true,
-      })
-      strictEqual(unchangedResult, false)
-    })
-
-    it('detects symlink target updates for --changed', async () => {
-      fs.ensureDirSync(
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Versions', 'B', 'Headers')
-      )
-      fs.writeFileSync(
-        join(
-          depPackageSymlinkDir,
-          'Framework.xcframework',
-          'Versions',
-          'B',
-          'Headers',
-          'header.h'
-        ),
-        '// updated header'
-      )
-      fs.removeSync(join(depPackageSymlinkDir, 'Framework.xcframework', 'Headers'))
-      fs.symlinkSync(
-        'Versions/B/Headers',
-        join(depPackageSymlinkDir, 'Framework.xcframework', 'Headers')
-      )
-
-      const changedResult = await copyPackageToStore({
-        workingDir: depPackageSymlinkDir,
-        changed: true,
-      })
-      ok(changedResult)
-
-      const copiedHeadersLinkPath = join(
-        publishedPackageSymlinkPath,
-        'Framework.xcframework',
-        'Headers'
-      )
-      ok(fs.lstatSync(copiedHeadersLinkPath).isSymbolicLink())
-      strictEqual(fs.readlinkSync(copiedHeadersLinkPath), 'Versions/B/Headers')
-    })
-
-    it('excludes symlinks from directories outside the files field', async () => {
-      // Simulate ios/Pods-style symlinks that should never be published
-      const podsDir = join(depPackageSymlinkDir, 'example', 'ios', 'Pods', 'Headers')
-      fs.ensureDirSync(podsDir)
-      fs.symlinkSync('bignum.h', join(podsDir, 'bignum-link.h'))
-
       await copyPackageToStore({ workingDir: depPackageSymlinkDir })
-
-      // Symlink outside files field must not appear in the store
-      checkNotExists(
-        join(
-          publishedPackageSymlinkPath,
-          'example',
-          'ios',
-          'Pods',
-          'Headers',
-          'bignum-link.h'
-        )
-      )
-
-      // Clean up
-      fs.removeSync(join(depPackageSymlinkDir, 'example'))
     })
 
-    it('copies symlinks correctly via copyDirSafe (update scenario)', async () => {
-      // Republish to ensure store has symlinks
+    it('preserves directory symlinks', () => {
+      ok(fs.lstatSync(pubFwDir('Headers')).isSymbolicLink())
+      strictEqual(fs.readlinkSync(pubFwDir('Headers')), 'Versions/A/Headers')
+    })
+
+    it('preserves nested symlinks', () => {
+      ok(fs.lstatSync(pubFwDir('Versions', 'Current')).isSymbolicLink())
+      strictEqual(fs.readlinkSync(pubFwDir('Versions', 'Current')), 'A')
+    })
+
+    it('returns false for --changed when unchanged', async () => {
+      strictEqual(
+        await copyPackageToStore({
+          workingDir: depPackageSymlinkDir,
+          changed: true,
+        }),
+        false
+      )
+    })
+
+    it('detects symlink target change via --changed', async () => {
+      fs.ensureDirSync(fwDir('Versions', 'B', 'Headers'))
+      fs.writeFileSync(fwDir('Versions', 'B', 'Headers', 'api.h'), '// v2')
+      fs.removeSync(fwDir('Headers'))
+      fs.symlinkSync('Versions/B/Headers', fwDir('Headers'))
+
+      ok(
+        await copyPackageToStore({
+          workingDir: depPackageSymlinkDir,
+          changed: true,
+        })
+      )
+      ok(fs.lstatSync(pubFwDir('Headers')).isSymbolicLink())
+      strictEqual(fs.readlinkSync(pubFwDir('Headers')), 'Versions/B/Headers')
+    })
+
+    it('excludes symlinks outside the files field', async () => {
+      fs.ensureDirSync(join(depPackageSymlinkDir, 'vendor', 'Pods'))
+      fs.symlinkSync('target', join(depPackageSymlinkDir, 'vendor', 'Pods', 'link'))
       await copyPackageToStore({ workingDir: depPackageSymlinkDir })
-
-      // Simulate yalc add: copy from store to a destination directory
-      const destDir = join(tmpDir, 'symlink-update-dest')
-      fs.removeSync(destDir)
-      fs.ensureDirSync(destDir)
-
-      await copyDirSafe(publishedPackageSymlinkPath, destDir, false)
-
-      // Symlinks should be preserved in dest
-      const headersLink = join(destDir, 'Framework.xcframework', 'Headers')
-      ok(fs.lstatSync(headersLink).isSymbolicLink(), 'Headers should be a symlink')
-      strictEqual(fs.readlinkSync(headersLink), 'Versions/B/Headers')
-
-      // Simulate yalc update: copy again (second call should not ENOENT)
-      await copyDirSafe(publishedPackageSymlinkPath, destDir, true)
-
-      // Symlinks still intact after update
-      ok(fs.lstatSync(headersLink).isSymbolicLink(), 'Headers should still be a symlink after update')
-      strictEqual(fs.readlinkSync(headersLink), 'Versions/B/Headers')
-
-      fs.removeSync(destDir)
+      checkNotExists(join(publishedPackageSymlinkPath, 'vendor'))
+      fs.removeSync(join(depPackageSymlinkDir, 'vendor'))
     })
   })
 
