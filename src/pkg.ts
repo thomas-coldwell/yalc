@@ -25,6 +25,7 @@ export interface PackageManifest {
   yalcSig?: string
   private?: boolean
   bin?: string | { [name: string]: string }
+  files?: string[]
   dependencies?: { [name: string]: string }
   devDependencies?: { [name: string]: string }
   peerDependencies?: { [name: string]: string }

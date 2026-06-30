@@ -13,6 +13,7 @@ import {
 import { readInstallationsFile } from '../src/installations'
 
 import { readLockfile, LockFileConfigV1 } from '../src/lockfile'
+import { copyPackageToStore } from '../src/copy'
 
 const values = {
   depPackage: 'dep-package',
@@ -20,6 +21,8 @@ const values = {
 
   depPackage2: 'dep-package2',
   depPackage2Version: '1.0.0',
+  depPackageSymlink: 'dep-package-symlink',
+  depPackageSymlinkVersion: '1.0.0',
   storeDir: 'yalc-store',
   project: 'project',
 
@@ -50,6 +53,7 @@ yalcGlobal.yalcStoreMainDir = storeMainDr
 
 const depPackageDir = join(tmpDir, values.depPackage)
 const depPackage2Dir = join(tmpDir, values.depPackage2)
+const depPackageSymlinkDir = join(tmpDir, values.depPackageSymlink)
 const projectDir = join(tmpDir, values.project)
 
 const publishedPackagePath = join(
@@ -64,6 +68,13 @@ const publishedPackage2Path = join(
   'packages',
   values.depPackage2,
   values.depPackage2Version
+)
+
+const publishedPackageSymlinkPath = join(
+  storeMainDr,
+  'packages',
+  values.depPackageSymlink,
+  values.depPackageSymlinkVersion
 )
 
 const checkExists = (path: string) =>
@@ -262,6 +273,74 @@ describe('Yalc package manager', function () {
     it('publishes package to store', () => {
       checkExists(publishedFilePath)
       checkExists(join(publishedPackage2Path, 'package.json'))
+    })
+  })
+
+  describe('Symlink publish', () => {
+    const fwDir = (...p: string[]) =>
+      join(depPackageSymlinkDir, 'lib.framework', ...p)
+    const pubFwDir = (...p: string[]) =>
+      join(publishedPackageSymlinkPath, 'lib.framework', ...p)
+
+    before(async () => {
+      fs.removeSync(depPackageSymlinkDir)
+      fs.ensureDirSync(fwDir('Versions', 'A', 'Headers'))
+      fs.ensureDirSync(fwDir('Versions', 'A', 'Resources'))
+      fs.writeFileSync(fwDir('Versions', 'A', 'Headers', 'api.h'), '')
+      fs.writeFileSync(fwDir('Versions', 'A', 'Resources', 'Info.plist'), '')
+      fs.symlinkSync('Versions/A/Headers', fwDir('Headers'))
+      fs.symlinkSync('Versions/A/Resources', fwDir('Resources'))
+      fs.symlinkSync('A', fwDir('Versions', 'Current'))
+      fs.writeJsonSync(join(depPackageSymlinkDir, 'package.json'), {
+        name: values.depPackageSymlink,
+        version: values.depPackageSymlinkVersion,
+        files: ['lib.framework'],
+      })
+      await copyPackageToStore({ workingDir: depPackageSymlinkDir })
+    })
+
+    it('preserves directory symlinks', () => {
+      ok(fs.lstatSync(pubFwDir('Headers')).isSymbolicLink())
+      strictEqual(fs.readlinkSync(pubFwDir('Headers')), 'Versions/A/Headers')
+    })
+
+    it('preserves nested symlinks', () => {
+      ok(fs.lstatSync(pubFwDir('Versions', 'Current')).isSymbolicLink())
+      strictEqual(fs.readlinkSync(pubFwDir('Versions', 'Current')), 'A')
+    })
+
+    it('returns false for --changed when unchanged', async () => {
+      strictEqual(
+        await copyPackageToStore({
+          workingDir: depPackageSymlinkDir,
+          changed: true,
+        }),
+        false
+      )
+    })
+
+    it('detects symlink target change via --changed', async () => {
+      fs.ensureDirSync(fwDir('Versions', 'B', 'Headers'))
+      fs.writeFileSync(fwDir('Versions', 'B', 'Headers', 'api.h'), '// v2')
+      fs.removeSync(fwDir('Headers'))
+      fs.symlinkSync('Versions/B/Headers', fwDir('Headers'))
+
+      ok(
+        await copyPackageToStore({
+          workingDir: depPackageSymlinkDir,
+          changed: true,
+        })
+      )
+      ok(fs.lstatSync(pubFwDir('Headers')).isSymbolicLink())
+      strictEqual(fs.readlinkSync(pubFwDir('Headers')), 'Versions/B/Headers')
+    })
+
+    it('excludes symlinks outside the files field', async () => {
+      fs.ensureDirSync(join(depPackageSymlinkDir, 'vendor', 'Pods'))
+      fs.symlinkSync('target', join(depPackageSymlinkDir, 'vendor', 'Pods', 'link'))
+      await copyPackageToStore({ workingDir: depPackageSymlinkDir })
+      checkNotExists(join(publishedPackageSymlinkPath, 'vendor'))
+      fs.removeSync(join(depPackageSymlinkDir, 'vendor'))
     })
   })
 

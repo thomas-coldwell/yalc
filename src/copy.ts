@@ -14,11 +14,17 @@ import {
 
 const shortSignatureLength = 8
 
-export const getFileHash = (srcPath: string, relPath: string = '') => {
-  return new Promise<string>(async (resolve, reject) => {
+export const getFileHash = async (srcPath: string, relPath: string = '') => {
+  const stat = await fs.lstat(srcPath)
+  const md5sum = crypto.createHash('md5')
+  md5sum.update(relPath.replace(/\\/g, '/'))
+  if (stat.isSymbolicLink()) {
+    const targetPath = await fs.readlink(srcPath)
+    md5sum.update(targetPath)
+    return md5sum.digest('hex')
+  }
+  return new Promise<string>((resolve, reject) => {
     const stream = fs.createReadStream(srcPath)
-    const md5sum = crypto.createHash('md5')
-    md5sum.update(relPath.replace(/\\/g, '/'))
     stream.on('data', (data: string) => md5sum.update(data))
     stream.on('error', reject).on('close', () => {
       resolve(md5sum.digest('hex'))
@@ -31,8 +37,59 @@ const copyFile = async (
   destPath: string,
   relPath: string = ''
 ) => {
-  await fs.copy(srcPath, destPath)
+  const stat = await fs.lstat(srcPath)
+  if (stat.isSymbolicLink()) {
+    const targetPath = await fs.readlink(srcPath)
+    await fs.ensureDir(dirname(destPath))
+    await fs.symlink(targetPath, destPath)
+  } else {
+    await fs.copy(srcPath, destPath)
+  }
   return getFileHash(srcPath, relPath)
+}
+
+const SKIP_DIRS = new Set(['node_modules', '.git'])
+
+const listSymlinks = async (
+  workingDir: string,
+  rootPaths: string[]
+): Promise<string[]> => {
+  const walk = async (relDir: string): Promise<string[]> => {
+    let entries: string[]
+    try {
+      entries = await fs.readdir(join(workingDir, relDir))
+    } catch {
+      return []
+    }
+    const lists = await Promise.all(
+      entries.map(async (name) => {
+        if (SKIP_DIRS.has(name)) return []
+        const rel = join(relDir, name).replace(/\\/g, '/')
+        try {
+          const s = await fs.lstat(join(workingDir, rel))
+          if (s.isSymbolicLink()) return [rel]
+          if (s.isDirectory()) return walk(rel)
+        } catch {
+          /* skip inaccessible */
+        }
+        return []
+      })
+    )
+    return lists.reduce<string[]>((a, b) => a.concat(b), [])
+  }
+
+  const results: string[] = []
+  for (const root of rootPaths) {
+    if (SKIP_DIRS.has(root.split('/')[0])) continue
+    try {
+      const s = await fs.lstat(join(workingDir, root))
+      if (s.isSymbolicLink()) results.push(root.replace(/\\/g, '/'))
+      else if (s.isDirectory()) results.push(...(await walk(root)))
+    } catch {
+      /* skip */
+    }
+  }
+  return results
 }
 
 const mapObj = <T, R, K extends string>(
@@ -152,7 +209,17 @@ export const copyPackageToStore = async (options: {
     fixScopedRelativeName
   )
 
-  const filesToCopy = npmList.filter((f) => !ignoreRule.ignores(f))
+  // Discover symlinks that npm-packlist may have excluded, scoped to
+  // the package's files field or existing top-level directories.
+  const symlinkRootPaths =
+    pkg.files && pkg.files.length > 0
+      ? pkg.files
+      : Array.from(new Set(npmList.map((f) => f.split('/')[0])))
+
+  const symlinkList = await listSymlinks(workingDir, symlinkRootPaths)
+  const filesToCopy = Array.from(new Set(npmList.concat(symlinkList))).filter(
+    (f) => !ignoreRule.ignores(f)
+  )
   if (options.content) {
     console.info('Files included in published content:')
     filesToCopy.sort().forEach((f) => {
