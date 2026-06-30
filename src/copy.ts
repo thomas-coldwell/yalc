@@ -40,35 +40,73 @@ const copyFile = async (
   const stat = await fs.lstat(srcPath)
   if (stat.isSymbolicLink()) {
     const targetPath = await fs.readlink(srcPath)
-    await fs.ensureDir(dirname(destPath))
-    await fs.symlink(targetPath, destPath)
+    try {
+      await fs.ensureDir(dirname(destPath))
+      await fs.symlink(targetPath, destPath)
+    } catch (e) {
+      console.warn(
+        `Warning: skipping copy of ${relPath}: ${(e as NodeJS.ErrnoException).message}`
+      )
+    }
   } else {
     await fs.copy(srcPath, destPath)
   }
   return getFileHash(srcPath, relPath)
 }
 
+const SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg'])
+
 const listSymlinks = async (
   workingDir: string,
-  relPath: string = ''
+  rootPaths: string[]
 ): Promise<string[]> => {
-  const currentDir = relPath ? join(workingDir, relPath) : workingDir
-  const entries = await fs.readdir(currentDir)
-  const nestedLists = await Promise.all(
-    entries.map(async (entryName) => {
-      const childRelPath = relPath ? join(relPath, entryName) : entryName
-      const childPath = join(currentDir, entryName)
-      const stat = await fs.lstat(childPath)
-      if (stat.isSymbolicLink()) {
-        return [childRelPath.replace(/\\/g, '/')]
-      }
-      if (stat.isDirectory()) {
-        return listSymlinks(workingDir, childRelPath)
-      }
+  const walkDir = async (relDir: string): Promise<string[]> => {
+    const fullDir = join(workingDir, relDir)
+    let entries: string[]
+    try {
+      entries = await fs.readdir(fullDir)
+    } catch (e) {
       return []
-    })
-  )
-  return nestedLists.reduce<string[]>((all, next) => all.concat(next), [])
+    }
+    const nestedLists = await Promise.all(
+      entries.map(async (entryName) => {
+        if (SKIP_DIRS.has(entryName)) return []
+        const childRelPath = join(relDir, entryName)
+        const childPath = join(workingDir, childRelPath)
+        try {
+          const stat = await fs.lstat(childPath)
+          if (stat.isSymbolicLink()) {
+            return [childRelPath.replace(/\\/g, '/')]
+          }
+          if (stat.isDirectory()) {
+            return walkDir(childRelPath)
+          }
+        } catch (e) {
+          // ignore inaccessible paths
+        }
+        return []
+      })
+    )
+    return nestedLists.reduce<string[]>((all, next) => all.concat(next), [])
+  }
+
+  const results: string[] = []
+  for (const rootPath of rootPaths) {
+    const topComponent = rootPath.split('/')[0]
+    if (SKIP_DIRS.has(topComponent)) continue
+    try {
+      const stat = await fs.lstat(join(workingDir, rootPath))
+      if (stat.isSymbolicLink()) {
+        results.push(rootPath.replace(/\\/g, '/'))
+      } else if (stat.isDirectory()) {
+        const nested = await walkDir(rootPath)
+        results.push(...nested)
+      }
+    } catch (e) {
+      // ignore inaccessible paths
+    }
+  }
+  return results
 }
 
 const mapObj = <T, R, K extends string>(
@@ -188,7 +226,16 @@ export const copyPackageToStore = async (options: {
     fixScopedRelativeName
   )
 
-  const symlinkList = await listSymlinks(workingDir)
+  // Scope symlink discovery to the package's files field, or fall back to
+  // the top-level directories already included by npm-packlist. This prevents
+  // walking into node_modules, ios/Pods, and other directories that contain
+  // symlinks not intended for publishing.
+  const symlinkRootPaths =
+    pkg.files && pkg.files.length > 0
+      ? pkg.files
+      : Array.from(new Set(npmList.map((f) => f.split('/')[0])))
+
+  const symlinkList = await listSymlinks(workingDir, symlinkRootPaths)
   const filesToCopy = Array.from(new Set(npmList.concat(symlinkList))).filter(
     (f) => !ignoreRule.ignores(f)
   )

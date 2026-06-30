@@ -14,6 +14,7 @@ import { readInstallationsFile } from '../src/installations'
 
 import { readLockfile, LockFileConfigV1 } from '../src/lockfile'
 import { copyPackageToStore } from '../src/copy'
+import { copyDirSafe } from '../src/sync-dir'
 
 const values = {
   depPackage: 'dep-package',
@@ -399,6 +400,56 @@ describe('Yalc package manager', function () {
       )
       ok(fs.lstatSync(copiedHeadersLinkPath).isSymbolicLink())
       strictEqual(fs.readlinkSync(copiedHeadersLinkPath), 'Versions/B/Headers')
+    })
+
+    it('excludes symlinks from directories outside the files field', async () => {
+      // Simulate ios/Pods-style symlinks that should never be published
+      const podsDir = join(depPackageSymlinkDir, 'example', 'ios', 'Pods', 'Headers')
+      fs.ensureDirSync(podsDir)
+      fs.symlinkSync('bignum.h', join(podsDir, 'bignum-link.h'))
+
+      await copyPackageToStore({ workingDir: depPackageSymlinkDir })
+
+      // Symlink outside files field must not appear in the store
+      checkNotExists(
+        join(
+          publishedPackageSymlinkPath,
+          'example',
+          'ios',
+          'Pods',
+          'Headers',
+          'bignum-link.h'
+        )
+      )
+
+      // Clean up
+      fs.removeSync(join(depPackageSymlinkDir, 'example'))
+    })
+
+    it('copies symlinks correctly via copyDirSafe (update scenario)', async () => {
+      // Republish to ensure store has symlinks
+      await copyPackageToStore({ workingDir: depPackageSymlinkDir })
+
+      // Simulate yalc add: copy from store to a destination directory
+      const destDir = join(tmpDir, 'symlink-update-dest')
+      fs.removeSync(destDir)
+      fs.ensureDirSync(destDir)
+
+      await copyDirSafe(publishedPackageSymlinkPath, destDir, false)
+
+      // Symlinks should be preserved in dest
+      const headersLink = join(destDir, 'Framework.xcframework', 'Headers')
+      ok(fs.lstatSync(headersLink).isSymbolicLink(), 'Headers should be a symlink')
+      strictEqual(fs.readlinkSync(headersLink), 'Versions/B/Headers')
+
+      // Simulate yalc update: copy again (second call should not ENOENT)
+      await copyDirSafe(publishedPackageSymlinkPath, destDir, true)
+
+      // Symlinks still intact after update
+      ok(fs.lstatSync(headersLink).isSymbolicLink(), 'Headers should still be a symlink after update')
+      strictEqual(fs.readlinkSync(headersLink), 'Versions/B/Headers')
+
+      fs.removeSync(destDir)
     })
   })
 
